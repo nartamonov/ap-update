@@ -1,0 +1,31 @@
+# Based on https://github.com/nartamonov/scala/blob/2.12.x/.gitattributes
+
+# Handle line endings automatically for files detected as text
+# and leave all files detected as binary untouched.
+* text=auto
+
+# check out text files with lf, not crlf, on Windows.  (especially
+# important for Scala source files, since """ preserves line endings)
+text eol=lf
+
+# These files are text and should be normalized (convert crlf => lf)
+*.java    eol=lf
+*.sbt     eol=lf
+*.scala   eol=lf
+*.sh      eol=lf
+*.txt     eol=lf
+*.xml     eol=lf
+*.md      eol=lf
+
+# Windows-specific files get windows endings
+*.bat     eol=crlf
+*.cmd     eol=crlf
+
+# Some binary file types for completeness
+# (binary is a macro for -text -diff)
+*.dll     binary
+*.gif     binary
+*.jpg     binary
+*.png     binary
+*.class   -text diff=class
+*.jar     -text diff=jar
