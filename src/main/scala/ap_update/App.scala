@@ -19,22 +19,53 @@ import cats.syntax.traverse._
 import cats.instances.vector._
 import ap_update.console.ansi._
 import ap_update.console.table._
+import cats.data.{Validated, ValidatedNel}
+import com.monovore.decline.{Argument, Command, Opts}
 import org.apache.commons.csv.{CSVFormat, CSVParser, CSVRecord}
 
 import scala.util.Try
 
 object App extends IOApp {
-  def run(args: List[String]): IO[ExitCode] = {
+  implicit val readCSVFormat: Argument[CSVFormat] = new Argument[CSVFormat] {
+    def read(string: String): ValidatedNel[String, CSVFormat] = {
+      string.toLowerCase match {
+        case "csv"         => Validated.valid(CSVFormat.DEFAULT)
+        case "csv-excel"   => Validated.valid(CSVFormat.EXCEL)
+        case "csv-rfc4180" => Validated.valid(CSVFormat.RFC4180)
+        case fmt           => Validated.invalidNel(s"Некорректный формат данных: $fmt")
+      }
+    }
 
-    withAnsiConsole {
-      for {
-        groups      <- readGroupsFromCSVFile(null, null)
-        localZoneId <- IO(ZoneId.systemDefault())
-        now         <- IO(LocalDateTime.now(localZoneId))
-        theSchedule  = schedule(groups, LocalDateTime.parse("2018-10-28T18:00"))
-        _           <- printSchedule(theSchedule, now, localZoneId)
-        continue    <- askToContinue
-      } yield ExitCode.Success
+    def defaultMetavar: String = "формат"
+  }
+
+  val csvFormat = Opts.option[CSVFormat]("data-format", short = "f",
+    help = "формат файла с группами точек подключения, один из: csv, csv-excel, csv-rfc4180; по умолчанию csv")
+    .withDefault(CSVFormat.DEFAULT)
+  val dataFile = Opts.argument[Path]()
+
+  case class Config(csvFormat: CSVFormat, dataFile: Path)
+
+  def readArgs: Opts[Config] = (csvFormat, dataFile).mapN(Config)
+
+  val appCmd: Command[Config] = Command("ap-update",
+    "Последовательное обновление точек доступа Wi-Fi", helpFlag = true)(readArgs)
+
+  def run(args: List[String]): IO[ExitCode] = {
+    appCmd.parse(args) match {
+      case Right(config) =>
+        withAnsiConsole {
+          for {
+            groups      <- readGroupsFromCSVFile(config.dataFile, config.csvFormat)
+            localZoneId <- IO(ZoneId.systemDefault())
+            now         <- IO(LocalDateTime.now(localZoneId))
+            theSchedule  = schedule(groups, LocalDateTime.parse("2018-10-28T18:00"))
+            _           <- printSchedule(theSchedule, now, localZoneId)
+            continue    <- askToContinue
+          } yield ExitCode.Success
+        }
+      case Left(help) =>
+        Console.io.putError(help.toString()).as(ExitCode.Error)
     }
   }
 
