@@ -29,8 +29,8 @@ class AppSpec extends FunSpec with Matchers with Inside {
   describe("readGroupsFromCSVFile") {
     it("корректно читает валидный файл") {
       val sampleFile = Paths.get(getClass.getResource("sample-groups-excel.csv").toURI)
-      val fmt = CSVFormat.EXCEL.withDelimiter(';')
-      readGroupsFromCSVFile(sampleFile, fmt).unsafeRunSync() should contain theSameElementsInOrderAs Vector(
+      val read = readGroupsFromCSVFile(sampleFile, CSVFormat.EXCEL, ';', withHeader = false)
+      read.unsafeRunSync() should contain theSameElementsInOrderAs Vector(
         APGroup("FC-1", ZoneOffset.ofHours(4)),
         APGroup("FC-2", ZoneOffset.ofHours(-1)),
         APGroup("FC-3", ZoneOffset.ofHours(5)),
@@ -41,9 +41,9 @@ class AppSpec extends FunSpec with Matchers with Inside {
 
     it("обнаруживает проблему с несовпадающим символом разделитем") {
       val sampleFile = Paths.get(getClass.getResource("sample-groups-excel.csv").toURI)
+      val read = readGroupsFromCSVFile(sampleFile, CSVFormat.EXCEL, ',', withHeader = false)
       // Читаем файл, полагая, что в нем стандартный разделитель запятая, в то время как фактический разделитель - ';'
-      val fmt = CSVFormat.EXCEL
-      inside(readGroupsFromCSVFile(sampleFile, fmt).attempt.unsafeRunSync()) {
+      inside(read.attempt.unsafeRunSync()) {
         case Left(GroupsReadingError(msg, _)) =>
           msg should include("неверный символ-разделитель")
       }
@@ -51,8 +51,8 @@ class AppSpec extends FunSpec with Matchers with Inside {
 
     it("обнаруживает проблему с неверным форматом часовой зоны") {
       val sampleFile = Paths.get(getClass.getResource("sample-groups-invalid.csv").toURI)
-      val fmt = CSVFormat.EXCEL.withDelimiter(';')
-      inside(readGroupsFromCSVFile(sampleFile, fmt).attempt.unsafeRunSync()) {
+      val read = readGroupsFromCSVFile(sampleFile, CSVFormat.EXCEL, ';', withHeader = false)
+      inside(read.attempt.unsafeRunSync()) {
         case Left(GroupsReadingError(msg, _)) =>
           msg should include("неверный формат смещения часовой зоны")
       }

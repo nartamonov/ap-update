@@ -14,67 +14,62 @@ import cats.syntax.flatMap._
 import cats.syntax.foldable._
 import cats.syntax.functor._
 import cats.syntax.monad._
+import cats.syntax.applicativeError._
 import cats.syntax.show._
 import cats.syntax.traverse._
 import cats.instances.vector._
+import cats.instances.int._
+import cats.instances.string._
+import cats.effect.Console.io._
 import ap_update.console.ansi._
 import ap_update.console.table._
-import cats.data.{Validated, ValidatedNel}
-import com.monovore.decline.{Argument, Command, Opts}
 import org.apache.commons.csv.{CSVFormat, CSVParser, CSVRecord}
 
 import scala.util.Try
+import scala.util.control.NonFatal
+
+case class Config(csvFormat: CSVFormat,
+                  delimiter: Char,
+                  withHeader: Boolean,
+                  dataFile: Path,
+                  updateAt: LocalDateTime)
 
 object App extends IOApp {
-  implicit val readCSVFormat: Argument[CSVFormat] = new Argument[CSVFormat] {
-    def read(string: String): ValidatedNel[String, CSVFormat] = {
-      string.toLowerCase match {
-        case "csv"         => Validated.valid(CSVFormat.DEFAULT)
-        case "csv-excel"   => Validated.valid(CSVFormat.EXCEL)
-        case "csv-rfc4180" => Validated.valid(CSVFormat.RFC4180)
-        case fmt           => Validated.invalidNel(s"Некорректный формат данных: $fmt")
-      }
-    }
 
-    def defaultMetavar: String = "формат"
-  }
-
-  val csvFormat = Opts.option[CSVFormat]("data-format", short = "f",
-    help = "формат файла с группами точек подключения, один из: csv, csv-excel, csv-rfc4180; по умолчанию csv")
-    .withDefault(CSVFormat.DEFAULT)
-  val dataFile = Opts.argument[Path]()
-
-  case class Config(csvFormat: CSVFormat, dataFile: Path)
-
-  def readArgs: Opts[Config] = (csvFormat, dataFile).mapN(Config)
-
-  val appCmd: Command[Config] = Command("ap-update",
-    "Последовательное обновление точек доступа Wi-Fi", helpFlag = true)(readArgs)
+  implicit val showZoneId: Show[ZoneId] = Show.fromToString
 
   def run(args: List[String]): IO[ExitCode] = {
-    appCmd.parse(args) match {
+    AppCommand.appCmd.parse(args) match {
       case Right(config) =>
         withAnsiConsole {
           for {
-            groups      <- readGroupsFromCSVFile(config.dataFile, config.csvFormat)
+            groups      <- readGroupsFromCSVFile(config.dataFile, config.csvFormat, config.delimiter, config.withHeader)
+            _           <- putStrLn(s"Прочитано ${green(groups.size)} групп точек подключений.")
+            _           <- putStrLn(s"Обновления будут начаты не ранее ${green(config.updateAt.format(Formats.RussianDateTimeFormat))} по местному времени группы.")
             localZoneId <- IO(ZoneId.systemDefault())
             now         <- IO(LocalDateTime.now(localZoneId))
-            theSchedule  = schedule(groups, LocalDateTime.parse("2018-10-28T18:00"))
+            theSchedule  = schedule(groups, config.updateAt)
             _           <- printSchedule(theSchedule, now, localZoneId)
             continue    <- askToContinue
           } yield ExitCode.Success
+        }.recoverWith {
+          case NonFatal(e) =>
+            putError(Option(e.getLocalizedMessage).getOrElse(s"Произошла непредвиденная ошибка: ${e.getClass}")).as(ExitCode.Error)
         }
       case Left(help) =>
-        Console.io.putError(help.toString()).as(ExitCode.Error)
+        putError(help.toString()).as(ExitCode.Error)
     }
   }
 
   case class GroupsReadingError(msg: String, cause: Option[Throwable]) extends Exception(msg, cause.orNull)
 
-  def readGroupsFromCSVFile(file: Path, format: CSVFormat): IO[Vector[APGroup]] = {
+  def readGroupsFromCSVFile(file: Path, format: CSVFormat, delimiter: Char, withHeader: Boolean): IO[Vector[APGroup]] = {
     import scala.collection.JavaConverters._
 
-    def openFile: IO[CSVParser] = IO(format.parse(new FileReader(file.toFile)))
+    def openFile: IO[CSVParser] = IO {
+      val fmt = format.withDelimiter(delimiter)
+      (if (withHeader) fmt.withFirstRecordAsHeader() else fmt).parse(new FileReader(file.toFile))
+    }
 
     def parseZoneOffset(s: String): Option[ZoneOffset] = Try { ZoneOffset.of(s) }.toOption
 
@@ -89,7 +84,7 @@ object App extends IOApp {
         val zoneOffsetValue = record.get(1)
         parseZoneOffset(zoneOffsetValue) match {
           case Some(offset) => APGroup(record.get(0), ZoneOffset.of(record.get(1)))
-          case None => throwErrorInRecord(record, s"неверный формат смещения часовой зоны ($zoneOffsetValue). Примеры верных значений: +04:00, +05:30, +00:00, -07:00.")
+          case None => throwErrorInRecord(record, s"неверный формат смещения часовой зоны ('$zoneOffsetValue'). Примеры верных значений: +04:00, +05:30, +00:00, -07:00.")
         }
       }
       records.toVector
@@ -99,14 +94,12 @@ object App extends IOApp {
   }
 
   def askToContinue: IO[Boolean] = {
-    import Console.io._
-
     def readYesOrNo: IO[Boolean] =
       readLn.flatMap { in =>
         in.toLowerCase match {
           case "y" | "yes" | "д" | "да" => IO.pure(true)
           case "n" | "no" | "н" | "нет" => IO.pure(false)
-          case _ => putStrLn("Неверный ввод, введите yes/no/да/нет: ") >> readYesOrNo
+          case _ => putStr("Неверный ввод, введите yes/no/да/нет: ") >> readYesOrNo
         }
       }
 
@@ -115,8 +108,6 @@ object App extends IOApp {
 
   /** Группа точек доступа (access point group) */
   case class APGroup(name: String, zoneOffset: ZoneOffset)
-
-  def readGroups(filename: Path): IO[Vector[APGroup]] = ???
 
   case class ScheduledBucket(at: ZonedDateTime, groups: Set[APGroup]) {
     def isLate(now: ZonedDateTime): Boolean = at.isBefore(now)
@@ -142,20 +133,12 @@ object App extends IOApp {
     Schedule(buckets)
   }
 
-  private val DateTimeFormat = DateTimeFormatter.ofPattern("dd.MM.YYYY HH:mm")
-
   def printSchedule(schedule: Schedule, now: LocalDateTime, localZoneId: ZoneId): IO[Unit] = {
     implicit val consoleIO: Console[IO] = Console.io
 
-    import consoleIO._
-    import cats.instances.int._
-    import cats.instances.string._
-
-    implicit val showZoneId: Show[ZoneId] = Show.fromToString
-
     def groupNames(bucket: ScheduledBucket): String = bucket.groups.map(_.name).mkString(",")
     def bucketLocalDT(bucket: ScheduledBucket): Cell = {
-      val dt = bucket.at.withZoneSameInstant(localZoneId).format(DateTimeFormat)
+      val dt = bucket.at.withZoneSameInstant(localZoneId).format(Formats.RussianDateTimeFormat)
       // Те бакеты, запуск которых уже просрочен, выводим красными
       if (bucket.isLate(now.atZone(localZoneId)))
         Cell(dt,Some(Color.Red))
@@ -176,7 +159,7 @@ object App extends IOApp {
     }
 
     for {
-      _ <- putStrLn(s"Текущее местное время: ${green(now.format(DateTimeFormat))} (в зоне ${green(localZoneId)})")
+      _ <- putStrLn(s"Текущее местное время: ${green(now.format(Formats.RussianDateTimeFormat))} (в зоне ${green(localZoneId)})")
       _ <- putStrLn("Расписание запуска обновлений для групп точек доступа:\n")
       _ <- scheduleTable.print
       _ <- putStrLn("")
